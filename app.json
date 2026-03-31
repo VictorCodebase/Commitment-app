@@ -1,0 +1,45 @@
+{
+	"expo": {
+		"name": "Commitment",
+		"slug": "commitment-app",
+		"version": "1.0.0",
+		"orientation": "portrait",
+		"icon": "./assets/icon.png",
+		"userInterfaceStyle": "dark",
+		"splash": {
+			"backgroundColor": "#0A0A0A"
+		},
+		"ios": {
+			"supportsTablet": false,
+			"bundleIdentifier": "com.yourname.commitment",
+			"infoPlist": {
+				"UIBackgroundModes": ["fetch", "remote-notification"]
+			}
+		},
+		"android": {
+			"adaptiveIcon": {
+				"backgroundColor": "#0A0A0A"
+			},
+			"package": "com.yourname.commitment",
+			"permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE", "SCHEDULE_EXACT_ALARM", "USE_EXACT_ALARM"]
+		},
+		"plugins": [
+			[
+				"expo-notifications",
+				{
+					"icon": "./assets/notification-icon.png",
+					"color": "#E8FF47",
+					"sounds": [],
+					"androidMode": "default",
+					"androidCollapsedTitle": "Commitment Check"
+				}
+			],
+			"expo-router",
+			"expo-sqlite"
+		],
+		"scheme": "commitment",
+		"experiments": {
+			"typedRoutes": true
+		}
+	}
+}
