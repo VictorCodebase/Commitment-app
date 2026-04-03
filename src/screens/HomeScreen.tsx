@@ -1,420 +1,399 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Animated, Platform, TextInput, KeyboardAvoidingView, Alert } from "react-native";
+import { useFocusEffect } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import * as Notifications from "expo-notifications";
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-  Animated,
-  Alert,
-  Platform,
-} from 'react-native';
-import { useFocusEffect } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import {
-  getTodayLogs,
-  markCommitmentDone,
-  seedTodayLogs,
-  allDailyDoneToday,
-  morningCommitmentsSetToday,
-  DailyLogWithTitle,
-} from '../db/database';
-import {
-  cancelAlarm,
-  cancelSnooze,
-  scheduleSnooze,
-  EVENING_ALARM_ID,
-  MORNING_ALARM_ID,
-} from '../utils/notifications';
-import { colors, spacing, radius } from '../utils/theme';
-import { format } from 'date-fns';
+	getTodayDailyLogs,
+	getTodayMorningLogs,
+	markLogDone,
+	seedTodayLogs,
+	allDailyDoneToday,
+	hasMorningIntentionsToday,
+	addMorningIntention,
+	deleteMorningIntention,
+	DailyLogWithTitle,
+} from "../db/database";
+import { cancelAlarm, cancelSnooze, scheduleSnooze, stopAlarmSound, EVENING_NOTIF_ID, MORNING_NOTIF_ID } from "../utils/notifications";
+import AlarmModal from "../components/AlarmModal";
+import { colors, spacing, radius } from "../utils/theme";
+import { format } from "date-fns";
+
+type AlarmType = "morning" | "evening" | null;
 
 export default function HomeScreen() {
-  const [logs, setLogs] = useState<DailyLogWithTitle[]>([]);
-  const [allDone, setAllDone] = useState(false);
-  const fadeAnim = useRef(new Animated.Value(0)).current;
+	const [dailyLogs, setDailyLogs] = useState<DailyLogWithTitle[]>([]);
+	const [morningLogs, setMorningLogs] = useState<DailyLogWithTitle[]>([]);
+	const [activeAlarm, setActiveAlarm] = useState<AlarmType>(null);
+	const [canDismiss, setCanDismiss] = useState(false);
+	const [newIntention, setNewIntention] = useState("");
+	const [addingIntention, setAddingIntention] = useState(false);
+	const fadeAnim = useRef(new Animated.Value(0)).current;
 
-  const load = useCallback(async () => {
-    await seedTodayLogs();
-    const data = await getTodayLogs();
-    setLogs(data);
-    const done = await allDailyDoneToday();
-    setAllDone(done);
-  }, []);
+	const load = useCallback(async () => {
+		try {
+			await seedTodayLogs();
+			const [dl, ml] = await Promise.all([getTodayDailyLogs(), getTodayMorningLogs()]);
+			setDailyLogs(dl);
+			setMorningLogs(ml);
+		} catch (e) {
+			console.warn("[HomeScreen] load failed:", e);
+		}
+	}, []);
 
-  useFocusEffect(
-    useCallback(() => {
-      load();
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 400,
-        useNativeDriver: true,
-      }).start();
-      return () => fadeAnim.setValue(0);
-    }, [load])
-  );
+	useFocusEffect(
+		useCallback(() => {
+			load();
+			Animated.timing(fadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+			return () => fadeAnim.setValue(0);
+		}, [load]),
+	);
 
-  const handleToggle = async (log: DailyLogWithTitle) => {
-    const nowDone = log.is_completed === 0;
-    await markCommitmentDone(log.id, nowDone);
-    await load();
+	// Listen for notifications tapped while app is open
+	useEffect(() => {
+		const sub = Notifications.addNotificationReceivedListener(async (notif) => {
+			const type = notif.request.content.data?.type as "morning" | "evening" | undefined;
+			if (type) triggerAlarm(type);
+		});
+		const tapSub = Notifications.addNotificationResponseReceivedListener(async (resp) => {
+			const type = resp.notification.request.content.data?.type as "morning" | "evening" | undefined;
+			if (type) triggerAlarm(type);
+		});
+		return () => {
+			sub.remove();
+			tapSub.remove();
+		};
+	}, []);
 
-    // If all daily items done → dismiss evening alarm
-    if (nowDone) {
-      const done = await allDailyDoneToday();
-      if (done) {
-        await cancelAlarm(EVENING_ALARM_ID);
-        await cancelSnooze('evening');
-      }
-    }
-  };
+	const triggerAlarm = async (type: "morning" | "evening") => {
+		let dismissable = false;
+		if (type === "evening") dismissable = await allDailyDoneToday();
+		if (type === "morning") dismissable = await hasMorningIntentionsToday();
+		setCanDismiss(dismissable);
+		setActiveAlarm(type);
+	};
 
-  const handleSnoozeEvening = async () => {
-    await scheduleSnooze('evening');
-    Alert.alert('Snoozed', 'Evening alarm will ring again shortly.');
-  };
+	const handleToggleDaily = async (log: DailyLogWithTitle) => {
+		const nowDone = log.is_completed === 0;
+		await markLogDone(log.id, nowDone);
+		await load();
 
-  const handleDismissMorning = async () => {
-    const hasGoals = await morningCommitmentsSetToday();
-    if (!hasGoals) {
-      Alert.alert(
-        'No Goals Set',
-        'Add at least one morning commitment to dismiss the morning alarm.'
-      );
-      return;
-    }
-    await cancelAlarm(MORNING_ALARM_ID);
-    await cancelSnooze('morning');
-    Alert.alert('Morning alarm dismissed', 'Good luck with your day!');
-  };
+		if (nowDone) {
+			const allDone = await allDailyDoneToday();
+			setCanDismiss(allDone);
+			if (allDone && activeAlarm === "evening") {
+				// auto-enable dismiss
+			}
+		}
+	};
 
-  const morningLogs = logs.filter(l => l.type === 'morning');
-  const dailyLogs = logs.filter(l => l.type === 'daily');
-  const doneCount = dailyLogs.filter(l => l.is_completed).length;
+	const handleToggleMorning = async (log: DailyLogWithTitle) => {
+		const nowDone = log.is_completed === 0;
+		await markLogDone(log.id, nowDone);
+		await load();
+	};
 
-  const today = format(new Date(), 'EEEE, MMM d');
+	const handleDeleteMorningLog = async (log: DailyLogWithTitle) => {
+		await deleteMorningIntention(log.id);
+		await load();
+		const has = await hasMorningIntentionsToday();
+		setCanDismiss(has);
+	};
 
-  return (
-    <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.date}>{today}</Text>
-        <Text style={styles.title}>Today</Text>
-        {dailyLogs.length > 0 && (
-          <View style={styles.progressRow}>
-            <View style={styles.progressTrack}>
-              <View
-                style={[
-                  styles.progressFill,
-                  { width: `${(doneCount / dailyLogs.length) * 100}%` },
-                ]}
-              />
-            </View>
-            <Text style={styles.progressLabel}>
-              {doneCount}/{dailyLogs.length}
-            </Text>
-          </View>
-        )}
-      </View>
+	const handleAddIntention = async () => {
+		const title = newIntention.trim();
+		if (!title) return;
+		try {
+			await addMorningIntention(title);
+			setNewIntention("");
+			setAddingIntention(false);
+			await load();
+			setCanDismiss(true);
+		} catch (e) {
+			console.error("[handleAddIntention] failed:", e);
+			//Alert.alert("Error", `Could not save intention: ${(e as Error).message}`);
+		}
+	};
 
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Morning commitments */}
-        {morningLogs.length > 0 && (
-          <>
-            <SectionLabel label="Morning Goals" color={colors.morning} />
-            {morningLogs.map(log => (
-              <CommitmentRow
-                key={log.id}
-                log={log}
-                onToggle={() => handleToggle(log)}
-                accentColor={colors.morning}
-              />
-            ))}
-            <TouchableOpacity
-              style={styles.dismissBtn}
-              onPress={handleDismissMorning}
-            >
-              <Text style={styles.dismissBtnText}>Dismiss morning alarm</Text>
-            </TouchableOpacity>
-          </>
-        )}
+	const handleAlarmDismiss = async () => {
+		if (!canDismiss) {
+			Alert.alert(
+				activeAlarm === "morning" ? "Set your intentions first" : "Finish your commitments first",
+				activeAlarm === "morning"
+					? "Add at least one intention for today to dismiss this alarm."
+					: "Tick off all your daily commitments to dismiss the evening alarm.",
+				[{ text: "OK" }],
+			);
+			return;
+		}
+		if (activeAlarm) {
+			await cancelAlarm(activeAlarm === "morning" ? MORNING_NOTIF_ID : EVENING_NOTIF_ID);
+			await cancelSnooze(activeAlarm);
+			await stopAlarmSound();
+		}
+		setActiveAlarm(null);
+	};
 
-        {/* Daily commitments */}
-        {dailyLogs.length > 0 && (
-          <>
-            <SectionLabel label="Daily Commitments" color={colors.daily} />
-            {dailyLogs.map(log => (
-              <CommitmentRow
-                key={log.id}
-                log={log}
-                onToggle={() => handleToggle(log)}
-                accentColor={colors.daily}
-              />
-            ))}
-          </>
-        )}
+	const handleAlarmSnooze = async () => {
+		if (activeAlarm) await scheduleSnooze(activeAlarm);
+		await stopAlarmSound();
+		setActiveAlarm(null);
+	};
 
-        {logs.length === 0 && <EmptyState />}
+	const doneCount = dailyLogs.filter((l) => l.is_completed).length;
+	const today = format(new Date(), "EEEE, MMM d");
+	const morningDismissHint = "Add at least one intention for today to dismiss the morning alarm.";
+	const eveningDismissHint = "Tick off all your daily commitments to dismiss the evening alarm.";
 
-        {/* Evening alarm controls */}
-        {dailyLogs.length > 0 && (
-          <View style={styles.alarmPanel}>
-            {allDone ? (
-              <View style={styles.allDoneBadge}>
-                <Ionicons name="checkmark-circle" size={18} color={colors.success} />
-                <Text style={styles.allDoneText}>
-                  Evening alarm dismissed — well done!
-                </Text>
-              </View>
-            ) : (
-              <TouchableOpacity
-                style={styles.snoozeBtn}
-                onPress={handleSnoozeEvening}
-              >
-                <Ionicons name="alarm-outline" size={16} color={colors.textSecondary} />
-                <Text style={styles.snoozeBtnText}>Snooze evening alarm</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        )}
-      </ScrollView>
-    </Animated.View>
-  );
+	return (
+		<KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+			<Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+				{/* Header */}
+				<View style={styles.header}>
+					<Text style={styles.date}>{today}</Text>
+					<Text style={styles.title}>Today</Text>
+					{dailyLogs.length > 0 && (
+						<View style={styles.progressRow}>
+							<View style={styles.progressTrack}>
+								<View style={[styles.progressFill, { width: `${(doneCount / dailyLogs.length) * 100}%` }]} />
+							</View>
+							<Text style={styles.progressLabel}>
+								{doneCount}/{dailyLogs.length}
+							</Text>
+						</View>
+					)}
+				</View>
+
+				<ScrollView
+					style={styles.scroll}
+					contentContainerStyle={styles.scrollContent}
+					showsVerticalScrollIndicator={false}
+					keyboardShouldPersistTaps="handled"
+				>
+					{/* ── Morning Intentions ── */}
+					<View style={styles.sectionBlock}>
+						<View style={styles.sectionHeaderRow}>
+							<View style={styles.sectionLabelRow}>
+								<View style={[styles.sectionDot, { backgroundColor: colors.morning }]} />
+								<View>
+									<Text style={styles.sectionLabel}>Today's Intentions</Text>
+									<Text style={styles.sectionSub}>What will you achieve today?</Text>
+								</View>
+							</View>
+							<TouchableOpacity style={styles.addSmallBtn} onPress={() => setAddingIntention((v) => !v)}>
+								<Ionicons name={addingIntention ? "close" : "add"} size={18} color={colors.morning} />
+							</TouchableOpacity>
+						</View>
+
+						{addingIntention && (
+							<View style={styles.intentionInputRow}>
+								<TextInput
+									style={styles.intentionInput}
+									placeholder="What do you intend to do today?"
+									placeholderTextColor={colors.textMuted}
+									value={newIntention}
+									onChangeText={setNewIntention}
+									autoFocus
+									returnKeyType="done"
+									onSubmitEditing={handleAddIntention}
+								/>
+								<TouchableOpacity
+									style={[styles.intentionAddBtn, !newIntention.trim() && { opacity: 0.4 }]}
+									onPress={handleAddIntention}
+									disabled={!newIntention.trim()}
+								>
+									<Ionicons name="arrow-up" size={16} color="#000" />
+								</TouchableOpacity>
+							</View>
+						)}
+
+						{morningLogs.length === 0 && !addingIntention && (
+							<Text style={styles.emptyHint}>Tap + to set your intentions for today</Text>
+						)}
+
+						{morningLogs.map((log) => (
+							<IntentionRow
+								key={log.id}
+								log={log}
+								onToggle={() => handleToggleMorning(log)}
+								onDelete={() => handleDeleteMorningLog(log)}
+							/>
+						))}
+					</View>
+
+					{/* ── Daily Commitments ── */}
+					{dailyLogs.length > 0 && (
+						<View style={styles.sectionBlock}>
+							<View style={styles.sectionLabelRow}>
+								<View style={[styles.sectionDot, { backgroundColor: colors.daily }]} />
+								<View>
+									<Text style={styles.sectionLabel}>Daily Commitments</Text>
+									<Text style={styles.sectionSub}>Your recurring habits for today</Text>
+								</View>
+							</View>
+							{dailyLogs.map((log) => (
+								<CommitmentRow key={log.id} log={log} onToggle={() => handleToggleDaily(log)} />
+							))}
+						</View>
+					)}
+
+					{dailyLogs.length === 0 && morningLogs.length === 0 && !addingIntention && <EmptyState />}
+				</ScrollView>
+
+				{/* Alarm modal */}
+				<AlarmModal
+					visible={activeAlarm !== null}
+					type={activeAlarm ?? "evening"}
+					canDismiss={canDismiss}
+					dismissHint={activeAlarm === "morning" ? morningDismissHint : eveningDismissHint}
+					onDismiss={handleAlarmDismiss}
+					onSnooze={handleAlarmSnooze}
+				/>
+			</Animated.View>
+		</KeyboardAvoidingView>
+	);
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-function SectionLabel({ label, color }: { label: string; color: string }) {
-  return (
-    <View style={styles.sectionLabelRow}>
-      <View style={[styles.sectionDot, { backgroundColor: color }]} />
-      <Text style={styles.sectionLabel}>{label}</Text>
-    </View>
-  );
+function IntentionRow({ log, onToggle, onDelete }: { log: DailyLogWithTitle; onToggle: () => void; onDelete: () => void }) {
+	const done = log.is_completed === 1;
+	return (
+		<View style={[styles.row, done && styles.rowDone]}>
+			<TouchableOpacity
+				style={[styles.checkbox, done && { backgroundColor: colors.morning, borderColor: colors.morning }]}
+				onPress={onToggle}
+			>
+				{done && <Ionicons name="checkmark" size={13} color="#000" />}
+			</TouchableOpacity>
+			<Text style={[styles.rowText, done && styles.rowTextDone]}>{log.title}</Text>
+			<TouchableOpacity style={styles.deleteSmall} onPress={onDelete}>
+				<Ionicons name="close" size={14} color={colors.textMuted} />
+			</TouchableOpacity>
+		</View>
+	);
 }
 
-function CommitmentRow({
-  log,
-  onToggle,
-  accentColor,
-}: {
-  log: DailyLogWithTitle;
-  onToggle: () => void;
-  accentColor: string;
-}) {
-  const scale = useRef(new Animated.Value(1)).current;
-  const done = log.is_completed === 1;
+function CommitmentRow({ log, onToggle }: { log: DailyLogWithTitle; onToggle: () => void }) {
+	const scale = useRef(new Animated.Value(1)).current;
+	const done = log.is_completed === 1;
 
-  const handlePress = () => {
-    Animated.sequence([
-      Animated.timing(scale, { toValue: 0.95, duration: 80, useNativeDriver: true }),
-      Animated.timing(scale, { toValue: 1, duration: 80, useNativeDriver: true }),
-    ]).start(() => onToggle());
-  };
+	const handlePress = () => {
+		Animated.sequence([
+			Animated.timing(scale, { toValue: 0.96, duration: 70, useNativeDriver: true }),
+			Animated.timing(scale, { toValue: 1, duration: 70, useNativeDriver: true }),
+		]).start(onToggle);
+	};
 
-  return (
-    <Animated.View style={{ transform: [{ scale }] }}>
-      <TouchableOpacity
-        style={[styles.row, done && styles.rowDone]}
-        onPress={handlePress}
-        activeOpacity={0.8}
-      >
-        <View
-          style={[
-            styles.checkbox,
-            done && { backgroundColor: accentColor, borderColor: accentColor },
-          ]}
-        >
-          {done && <Ionicons name="checkmark" size={14} color="#000" />}
-        </View>
-        <Text style={[styles.rowText, done && styles.rowTextDone]}>
-          {log.title}
-        </Text>
-      </TouchableOpacity>
-    </Animated.View>
-  );
+	return (
+		<Animated.View style={{ transform: [{ scale }] }}>
+			<TouchableOpacity style={[styles.row, done && styles.rowDone]} onPress={handlePress} activeOpacity={0.85}>
+				<View style={[styles.checkbox, done && { backgroundColor: colors.daily, borderColor: colors.daily }]}>
+					{done && <Ionicons name="checkmark" size={13} color="#000" />}
+				</View>
+				<Text style={[styles.rowText, done && styles.rowTextDone]}>{log.title}</Text>
+			</TouchableOpacity>
+		</Animated.View>
+	);
 }
 
 function EmptyState() {
-  return (
-    <View style={styles.empty}>
-      <Text style={styles.emptyIcon}>📋</Text>
-      <Text style={styles.emptyTitle}>No commitments yet</Text>
-      <Text style={styles.emptyBody}>
-        Go to the Commitments tab to add things you want to stay on top of.
-      </Text>
-    </View>
-  );
+	return (
+		<View style={styles.empty}>
+			<Text style={styles.emptyIcon}>📋</Text>
+			<Text style={styles.emptyTitle}>Nothing here yet</Text>
+			<Text style={styles.emptyBody}>
+				Go to the Commitments tab to add daily habits,{"\n"}
+				or tap + above to set today's intentions.
+			</Text>
+		</View>
+	);
 }
 
-// ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.bg,
-  },
-  header: {
-    paddingTop: Platform.OS === 'ios' ? 60 : 40,
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  date: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-    marginBottom: 4,
-  },
-  title: {
-    fontSize: 36,
-    fontWeight: '700',
-    color: colors.textPrimary,
-    marginBottom: spacing.md,
-  },
-  progressRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  progressTrack: {
-    flex: 1,
-    height: 3,
-    backgroundColor: colors.border,
-    borderRadius: 99,
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: colors.accent,
-    borderRadius: 99,
-  },
-  progressLabel: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    fontVariant: ['tabular-nums'],
-  },
-  scroll: { flex: 1 },
-  scrollContent: {
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.lg,
-    paddingBottom: 100,
-  },
-  sectionLabelRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginBottom: spacing.sm,
-    marginTop: spacing.md,
-  },
-  sectionDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 99,
-  },
-  sectionLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.textSecondary,
-    letterSpacing: 1.5,
-    textTransform: 'uppercase',
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.md,
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    marginBottom: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  rowDone: {
-    opacity: 0.5,
-  },
-  checkbox: {
-    width: 22,
-    height: 22,
-    borderRadius: 6,
-    borderWidth: 1.5,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  rowText: {
-    flex: 1,
-    fontSize: 16,
-    color: colors.textPrimary,
-  },
-  rowTextDone: {
-    textDecorationLine: 'line-through',
-    color: colors.textSecondary,
-  },
-  alarmPanel: {
-    marginTop: spacing.xl,
-  },
-  allDoneBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    padding: spacing.md,
-    backgroundColor: colors.surface,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.success + '44',
-  },
-  allDoneText: {
-    color: colors.success,
-    fontSize: 14,
-  },
-  snoozeBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    padding: spacing.md,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  snoozeBtnText: {
-    color: colors.textSecondary,
-    fontSize: 14,
-  },
-  dismissBtn: {
-    marginTop: spacing.xs,
-    marginBottom: spacing.md,
-    padding: spacing.sm,
-    alignItems: 'center',
-  },
-  dismissBtnText: {
-    color: colors.morning,
-    fontSize: 13,
-    textDecorationLine: 'underline',
-  },
-  empty: {
-    alignItems: 'center',
-    paddingTop: 80,
-    gap: spacing.sm,
-  },
-  emptyIcon: { fontSize: 48 },
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: colors.textPrimary,
-  },
-  emptyBody: {
-    fontSize: 14,
-    color: colors.textSecondary,
-    textAlign: 'center',
-    lineHeight: 22,
-    maxWidth: 280,
-  },
+	container: { flex: 1, backgroundColor: colors.bg },
+	header: {
+		paddingTop: Platform.OS === "ios" ? 60 : 40,
+		paddingHorizontal: spacing.lg,
+		paddingBottom: spacing.md,
+		borderBottomWidth: 1,
+		borderBottomColor: colors.border,
+	},
+	date: { fontSize: 11, color: colors.textSecondary, letterSpacing: 2, textTransform: "uppercase", marginBottom: 4 },
+	title: { fontSize: 36, fontWeight: "700", color: colors.textPrimary, marginBottom: spacing.md },
+	progressRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+	progressTrack: { flex: 1, height: 3, backgroundColor: colors.border, borderRadius: 99, overflow: "hidden" },
+	progressFill: { height: "100%", backgroundColor: colors.accent, borderRadius: 99 },
+	progressLabel: { fontSize: 12, color: colors.textSecondary },
+	scroll: { flex: 1 },
+	scrollContent: { padding: spacing.lg, paddingBottom: 100, gap: spacing.xl },
+	sectionBlock: { gap: spacing.sm },
+	sectionHeaderRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+	sectionLabelRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+	sectionDot: { width: 8, height: 8, borderRadius: 99 },
+	sectionLabel: { fontSize: 13, fontWeight: "600", color: colors.textPrimary, textTransform: "uppercase", letterSpacing: 0.8 },
+	sectionSub: { fontSize: 11, color: colors.textMuted, marginTop: 1 },
+	addSmallBtn: {
+		width: 30,
+		height: 30,
+		borderRadius: 15,
+		borderWidth: 1,
+		borderColor: colors.border,
+		alignItems: "center",
+		justifyContent: "center",
+	},
+	intentionInputRow: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: spacing.sm,
+		marginTop: spacing.xs,
+	},
+	intentionInput: {
+		flex: 1,
+		backgroundColor: colors.surface,
+		borderWidth: 1,
+		borderColor: colors.border,
+		borderRadius: radius.md,
+		paddingHorizontal: spacing.md,
+		paddingVertical: 10,
+		fontSize: 15,
+		color: colors.textPrimary,
+	},
+	intentionAddBtn: {
+		width: 36,
+		height: 36,
+		borderRadius: 18,
+		backgroundColor: colors.morning,
+		alignItems: "center",
+		justifyContent: "center",
+	},
+	emptyHint: { fontSize: 13, color: colors.textMuted, paddingVertical: spacing.xs },
+	row: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: spacing.md,
+		paddingVertical: 13,
+		paddingHorizontal: spacing.md,
+		backgroundColor: colors.surface,
+		borderRadius: radius.md,
+		borderWidth: 1,
+		borderColor: colors.border,
+	},
+	rowDone: { opacity: 0.45 },
+	checkbox: {
+		width: 22,
+		height: 22,
+		borderRadius: 6,
+		borderWidth: 1.5,
+		borderColor: colors.border,
+		alignItems: "center",
+		justifyContent: "center",
+	},
+	rowText: { flex: 1, fontSize: 15, color: colors.textPrimary },
+	rowTextDone: { textDecorationLine: "line-through", color: colors.textSecondary },
+	deleteSmall: { padding: 4 },
+	empty: { alignItems: "center", paddingTop: 60, gap: spacing.sm },
+	emptyIcon: { fontSize: 44 },
+	emptyTitle: { fontSize: 20, fontWeight: "600", color: colors.textPrimary },
+	emptyBody: { fontSize: 14, color: colors.textSecondary, textAlign: "center", lineHeight: 22, maxWidth: 280 },
 });

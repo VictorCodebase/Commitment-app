@@ -1,7 +1,5 @@
 import React, { useEffect } from "react";
 import { View, ActivityIndicator } from "react-native";
-import { useRouter } from "expo-router";
-import * as Notifications from "expo-notifications";
 import { initDb, seedTodayLogs } from "../src/db/database";
 import { requestNotificationPermissions, rescheduleAll } from "../src/utils/notifications";
 import HomeScreen from "../src/screens/HomeScreen";
@@ -12,10 +10,21 @@ export default function Index() {
 
 	useEffect(() => {
 		(async () => {
-			await initDb();
-			await seedTodayLogs();
-			const granted = await requestNotificationPermissions();
-			if (granted) await rescheduleAll();
+			try {
+				await initDb();
+				await seedTodayLogs();
+			} catch (e) {
+				console.warn("[Init] DB setup failed:", e);
+			}
+
+			try {
+				const granted = await requestNotificationPermissions();
+				if (granted) await rescheduleAll();
+			} catch (e) {
+				console.warn("[Init] Notification setup failed:", e);
+			}
+
+			// Always unblock the UI, even if something above failed
 			setReady(true);
 		})();
 	}, []);

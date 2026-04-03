@@ -9,40 +9,103 @@ export async function getDb(): Promise<SQLite.SQLiteDatabase> {
 	return db;
 }
 
-// ─── Schema ────────────────────────────────────────────────────────────────
+// ─── Schema + Migrations ──────────────────────────────────────────────────────
 export async function initDb() {
 	const database = await getDb();
 
+	await database.execAsync(`PRAGMA journal_mode = WAL;`);
+
+	// Create tables without CHECK constraints so ALTER TABLE migrations work cleanly
 	await database.execAsync(`
-    PRAGMA journal_mode = WAL;
-
-    -- Commitments: the things you want to do
     CREATE TABLE IF NOT EXISTS commitments (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      title       TEXT    NOT NULL,
-      type        TEXT    NOT NULL CHECK(type IN ('daily','morning')),
-      is_active   INTEGER NOT NULL DEFAULT 1,
-      created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      title         TEXT    NOT NULL,
+      type          TEXT    NOT NULL DEFAULT 'daily',
+      is_active     INTEGER NOT NULL DEFAULT 1,
+      days_of_week  TEXT,
+      created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
     );
 
-    -- Daily logs: one row per commitment per calendar day
     CREATE TABLE IF NOT EXISTS daily_logs (
-      id             INTEGER PRIMARY KEY AUTOINCREMENT,
-      commitment_id  INTEGER NOT NULL REFERENCES commitments(id) ON DELETE CASCADE,
-      date           TEXT    NOT NULL,   -- YYYY-MM-DD
-      is_completed   INTEGER NOT NULL DEFAULT 0,
-      completed_at   TEXT,              -- ISO datetime
-      UNIQUE(commitment_id, date)
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      commitment_id   INTEGER REFERENCES commitments(id) ON DELETE CASCADE,
+      date            TEXT    NOT NULL,
+      is_completed    INTEGER NOT NULL DEFAULT 0,
+      completed_at    TEXT,
+      ad_hoc_title    TEXT,
+      log_type        TEXT    NOT NULL DEFAULT 'daily'
     );
 
-    -- Settings: simple key/value store
     CREATE TABLE IF NOT EXISTS settings (
       key    TEXT PRIMARY KEY,
       value  TEXT NOT NULL
     );
   `);
 
-	// Seed defaults if missing
+	// ── Migration 1: add days_of_week to commitments if missing ──
+	try {
+		await database.execAsync(`ALTER TABLE commitments ADD COLUMN days_of_week TEXT`);
+	} catch (_) {
+		/* already exists */
+	}
+
+	// ── Migration 2: add ad_hoc_title + log_type to daily_logs if missing ──
+	try {
+		await database.execAsync(`ALTER TABLE daily_logs ADD COLUMN ad_hoc_title TEXT`);
+	} catch (_) {
+		/* already exists */
+	}
+	try {
+		await database.execAsync(`ALTER TABLE daily_logs ADD COLUMN log_type TEXT NOT NULL DEFAULT 'daily'`);
+	} catch (_) {
+		/* already exists */
+	}
+
+	// ── Migration 3: ensure commitment_id is nullable (v1 had it NOT NULL) ──
+	// SQLite cannot ALTER COLUMN, so we do the standard rename→recreate→copy→drop.
+	const tableInfo = await database.getAllAsync<{ name: string; notnull: number }>(`PRAGMA table_info(daily_logs)`);
+	const cidCol = tableInfo.find((c) => c.name === "commitment_id");
+	if (cidCol && cidCol.notnull === 1) {
+		await database.execAsync(`
+      PRAGMA foreign_keys = OFF;
+
+      ALTER TABLE daily_logs RENAME TO daily_logs_old;
+
+      CREATE TABLE daily_logs (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        commitment_id   INTEGER REFERENCES commitments(id) ON DELETE CASCADE,
+        date            TEXT    NOT NULL,
+        is_completed    INTEGER NOT NULL DEFAULT 0,
+        completed_at    TEXT,
+        ad_hoc_title    TEXT,
+        log_type        TEXT    NOT NULL DEFAULT 'daily'
+      );
+
+      INSERT INTO daily_logs
+        (id, commitment_id, date, is_completed, completed_at, ad_hoc_title, log_type)
+      SELECT
+        id, commitment_id, date, is_completed, completed_at,
+        ad_hoc_title,
+        COALESCE(log_type, 'daily')
+      FROM daily_logs_old;
+
+      DROP TABLE daily_logs_old;
+
+      PRAGMA foreign_keys = ON;
+    `);
+	}
+
+	// Backfill any rows where log_type ended up NULL
+	await database.execAsync(`UPDATE daily_logs SET log_type = 'daily' WHERE log_type IS NULL`);
+
+	// Unique index (IF NOT EXISTS is idempotent)
+	await database.execAsync(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_logs_commitment_date
+      ON daily_logs(commitment_id, date)
+      WHERE commitment_id IS NOT NULL;
+  `);
+
+	// Seed default settings
 	await database.execAsync(`
     INSERT OR IGNORE INTO settings (key, value) VALUES
       ('evening_alarm_time',  '21:00'),
@@ -53,7 +116,7 @@ export async function initDb() {
   `);
 }
 
-// ─── Commitment CRUD ────────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────────
 export type CommitmentType = "daily" | "morning";
 
 export interface Commitment {
@@ -61,12 +124,44 @@ export interface Commitment {
 	title: string;
 	type: CommitmentType;
 	is_active: number;
+	days_of_week: string | null;
 	created_at: string;
 }
 
+export interface DailyLog {
+	id: number;
+	commitment_id: number | null;
+	date: string;
+	is_completed: number;
+	completed_at: string | null;
+	ad_hoc_title: string | null;
+	log_type: "daily" | "morning";
+}
+
+export interface DailyLogWithTitle extends DailyLog {
+	title: string;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+export function todayStr(): string {
+	return new Date().toISOString().slice(0, 10);
+}
+
+function isoWeekday(date: Date): number {
+	const d = date.getDay();
+	return d === 0 ? 7 : d;
+}
+
+function appliesToDay(commitment: Commitment, date: Date): boolean {
+	if (!commitment.days_of_week) return true;
+	const dow = isoWeekday(date);
+	return commitment.days_of_week.split(",").map(Number).includes(dow);
+}
+
+// ─── Commitment CRUD ─────────────────────────────────────────────────────────
 export async function getCommitments(): Promise<Commitment[]> {
 	const database = await getDb();
-	return database.getAllAsync<Commitment>("SELECT * FROM commitments ORDER BY created_at ASC");
+	return database.getAllAsync<Commitment>("SELECT * FROM commitments ORDER BY type, created_at ASC");
 }
 
 export async function getActiveCommitments(type?: CommitmentType): Promise<Commitment[]> {
@@ -77,10 +172,15 @@ export async function getActiveCommitments(type?: CommitmentType): Promise<Commi
 	return database.getAllAsync<Commitment>("SELECT * FROM commitments WHERE is_active = 1 ORDER BY created_at ASC");
 }
 
-export async function addCommitment(title: string, type: CommitmentType): Promise<number> {
+export async function addCommitment(title: string, type: CommitmentType, daysOfWeek?: string | null): Promise<number> {
 	const database = await getDb();
-	const result = await database.runAsync("INSERT INTO commitments (title, type) VALUES (?, ?)", [title, type]);
+	const result = await database.runAsync("INSERT INTO commitments (title, type, days_of_week) VALUES (?, ?, ?)", [title, type, daysOfWeek ?? null]);
 	return result.lastInsertRowId;
+}
+
+export async function updateCommitment(id: number, title: string, daysOfWeek: string | null) {
+	const database = await getDb();
+	await database.runAsync("UPDATE commitments SET title = ?, days_of_week = ? WHERE id = ?", [title, daysOfWeek, id]);
 }
 
 export async function toggleCommitmentActive(id: number, is_active: boolean) {
@@ -93,92 +193,86 @@ export async function deleteCommitment(id: number) {
 	await database.runAsync("DELETE FROM commitments WHERE id = ?", [id]);
 }
 
-// ─── Daily Logs ─────────────────────────────────────────────────────────────
-export interface DailyLog {
-	id: number;
-	commitment_id: number;
-	date: string;
-	is_completed: number;
-	completed_at: string | null;
-}
-
-export interface DailyLogWithTitle extends DailyLog {
-	title: string;
-	type: CommitmentType;
-}
-
-export function todayStr(): string {
-	return new Date().toISOString().slice(0, 10);
-}
-
-/** Ensure every active commitment has a log row for today */
+// ─── Log seeding ─────────────────────────────────────────────────────────────
 export async function seedTodayLogs() {
 	const database = await getDb();
 	const today = todayStr();
-	const active = await getActiveCommitments();
+	const now = new Date();
+	const active = await getActiveCommitments("daily");
+
 	for (const c of active) {
-		await database.runAsync("INSERT OR IGNORE INTO daily_logs (commitment_id, date) VALUES (?, ?)", [c.id, today]);
+		if (!appliesToDay(c, now)) continue;
+		await database.runAsync(`INSERT OR IGNORE INTO daily_logs (commitment_id, date, log_type) VALUES (?, ?, 'daily')`, [c.id, today]);
 	}
 }
 
-export async function getTodayLogs(): Promise<DailyLogWithTitle[]> {
+// ─── Today's logs ────────────────────────────────────────────────────────────
+export async function getTodayDailyLogs(): Promise<DailyLogWithTitle[]> {
 	const database = await getDb();
-	return database.getAllAsync<DailyLogWithTitle>(
-		`
-    SELECT dl.*, c.title, c.type
-    FROM daily_logs dl
-    JOIN commitments c ON c.id = dl.commitment_id
-    WHERE dl.date = ? AND c.is_active = 1
-    ORDER BY c.type, c.created_at
-  `,
+	const rows = await database.getAllAsync<DailyLog & { c_title: string }>(
+		`SELECT dl.*, c.title as c_title
+     FROM daily_logs dl
+     JOIN commitments c ON c.id = dl.commitment_id
+     WHERE dl.date = ? AND dl.log_type = 'daily' AND c.is_active = 1
+     ORDER BY c.created_at ASC`,
 		[todayStr()],
 	);
+	return rows.map((r) => ({ ...r, title: r.c_title }));
 }
 
-export async function markCommitmentDone(logId: number, done: boolean) {
+export async function getTodayMorningLogs(): Promise<DailyLogWithTitle[]> {
 	const database = await getDb();
-	await database.runAsync(
-		`UPDATE daily_logs
-     SET is_completed = ?, completed_at = ?
-     WHERE id = ?`,
-		[done ? 1 : 0, done ? new Date().toISOString() : null, logId],
-	);
+	const rows = await database.getAllAsync<DailyLog>(`SELECT * FROM daily_logs WHERE date = ? AND log_type = 'morning' ORDER BY id ASC`, [todayStr()]);
+	return rows.map((r) => ({ ...r, title: r.ad_hoc_title ?? "" }));
 }
 
-/** Are ALL active evening (daily) commitments done today? */
+// ─── Morning intention CRUD ───────────────────────────────────────────────────
+export async function addMorningIntention(title: string): Promise<number> {
+	const database = await getDb();
+	const result = await database.runAsync(`INSERT INTO daily_logs (commitment_id, date, log_type, ad_hoc_title) VALUES (NULL, ?, 'morning', ?)`, [
+		todayStr(),
+		title.trim(),
+	]);
+	return result.lastInsertRowId;
+}
+
+export async function deleteMorningIntention(logId: number) {
+	const database = await getDb();
+	await database.runAsync("DELETE FROM daily_logs WHERE id = ? AND log_type = ?", [logId, "morning"]);
+}
+
+export async function markLogDone(logId: number, done: boolean) {
+	const database = await getDb();
+	await database.runAsync(`UPDATE daily_logs SET is_completed = ?, completed_at = ? WHERE id = ?`, [
+		done ? 1 : 0,
+		done ? new Date().toISOString() : null,
+		logId,
+	]);
+}
+
+// ─── Alarm dismiss conditions ─────────────────────────────────────────────────
 export async function allDailyDoneToday(): Promise<boolean> {
 	const database = await getDb();
 	const row = await database.getFirstAsync<{ total: number; done: number }>(
-		`
-    SELECT
-      COUNT(*) as total,
-      SUM(dl.is_completed) as done
-    FROM daily_logs dl
-    JOIN commitments c ON c.id = dl.commitment_id
-    WHERE dl.date = ? AND c.is_active = 1 AND c.type = 'daily'
-  `,
+		`SELECT COUNT(*) as total, SUM(dl.is_completed) as done
+     FROM daily_logs dl
+     JOIN commitments c ON c.id = dl.commitment_id
+     WHERE dl.date = ? AND dl.log_type = 'daily' AND c.is_active = 1`,
 		[todayStr()],
 	);
 	if (!row || row.total === 0) return true;
-	return row.done >= row.total;
+	return (row.done ?? 0) >= row.total;
 }
 
-/** Are ALL morning commitments entered for today? (at least 1 morning log) */
-export async function morningCommitmentsSetToday(): Promise<boolean> {
+export async function hasMorningIntentionsToday(): Promise<boolean> {
 	const database = await getDb();
-	const row = await database.getFirstAsync<{ total: number }>(
-		`
-    SELECT COUNT(*) as total
-    FROM daily_logs dl
-    JOIN commitments c ON c.id = dl.commitment_id
-    WHERE dl.date = ? AND c.is_active = 1 AND c.type = 'morning'
-  `,
-		[todayStr()],
-	);
+	const row = await database.getFirstAsync<{ total: number }>(`SELECT COUNT(*) as total FROM daily_logs WHERE date = ? AND log_type = 'morning'`, [
+		todayStr(),
+	]);
 	return (row?.total ?? 0) > 0;
 }
 
-// ─── Settings ───────────────────────────────────────────────────────────────
+// ─── Settings ─────────────────────────────────────────────────────────────────
 export async function getSetting(key: string): Promise<string | null> {
 	const database = await getDb();
 	const row = await database.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key = ?", [key]);
@@ -196,21 +290,13 @@ export async function getAllSettings(): Promise<Record<string, string>> {
 	return Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }
 
-// ─── Trends helpers (for future use) ────────────────────────────────────────
-export async function getCompletionsByDateRange(from: string, to: string): Promise<{ date: string; total: number; done: number }[]> {
+// ─── Trends (future) ──────────────────────────────────────────────────────────
+export async function getCompletionsByDateRange(from: string, to: string) {
 	const database = await getDb();
 	return database.getAllAsync(
-		`
-    SELECT
-      dl.date,
-      COUNT(*) as total,
-      SUM(dl.is_completed) as done
-    FROM daily_logs dl
-    JOIN commitments c ON c.id = dl.commitment_id
-    WHERE dl.date BETWEEN ? AND ? AND c.is_active = 1
-    GROUP BY dl.date
-    ORDER BY dl.date ASC
-  `,
+		`SELECT dl.date, COUNT(*) as total, SUM(dl.is_completed) as done
+     FROM daily_logs dl WHERE dl.date BETWEEN ? AND ?
+     GROUP BY dl.date ORDER BY dl.date ASC`,
 		[from, to],
 	);
 }

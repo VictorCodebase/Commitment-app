@@ -33,21 +33,24 @@ npx expo start
 
 ```
 app/
-  _layout.tsx         ← Tab navigation
-  index.tsx           ← Today screen (home)
-  commitments.tsx     ← Manage commitments
-  settings.tsx        ← Alarm times + snooze
+  _layout.tsx             ← Tab navigation
+  index.tsx               ← Today (home)
+  commitments.tsx
+  settings.tsx
 
 src/
+  components/
+    AlarmModal.tsx         ← Full-screen alarm overlay with sound
+    DayOfWeekPicker.tsx    ← Day selector component
   db/
-    database.ts       ← SQLite schema + all queries
+    database.ts            ← SQLite schema + all queries
   screens/
-    HomeScreen.tsx    ← Today's checklist
+    HomeScreen.tsx
     CommitmentsScreen.tsx
     SettingsScreen.tsx
   utils/
-    notifications.ts  ← Alarm scheduling logic
-    theme.ts          ← Colors, spacing
+    notifications.ts       ← Alarm scheduling + expo-av sound
+    theme.ts
 ```
 
 ---
@@ -61,6 +64,7 @@ settings      (key, value)
 ```
 
 The `daily_logs` table is designed for trend queries — you can later query:
+
 - Completion rate over time
 - Streaks per commitment
 - Best/worst days of week

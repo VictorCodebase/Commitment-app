@@ -1,19 +1,22 @@
 import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Alert, Platform, Animated, KeyboardAvoidingView } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Alert, Platform, KeyboardAvoidingView } from "react-native";
 import { useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { Commitment, CommitmentType, getCommitments, addCommitment, toggleCommitmentActive, deleteCommitment } from "../db/database";
+import DayOfWeekPicker, { daysToString, stringToDays, daysLabel } from "../components/DayOfWeekPicker";
 import { colors, spacing, radius } from "../utils/theme";
+
+const ALL_DAYS = [1, 2, 3, 4, 5, 6, 7];
 
 export default function CommitmentsScreen() {
 	const [commitments, setCommitments] = useState<Commitment[]>([]);
+	const [adding, setAdding] = useState(false);
 	const [newTitle, setNewTitle] = useState("");
 	const [newType, setNewType] = useState<CommitmentType>("daily");
-	const [adding, setAdding] = useState(false);
+	const [newDays, setNewDays] = useState<number[]>(ALL_DAYS);
 
 	const load = useCallback(async () => {
-		const data = await getCommitments();
-		setCommitments(data);
+		setCommitments(await getCommitments());
 	}, []);
 
 	useFocusEffect(
@@ -22,12 +25,19 @@ export default function CommitmentsScreen() {
 		}, [load]),
 	);
 
+	const resetForm = () => {
+		setNewTitle("");
+		setNewType("daily");
+		setNewDays(ALL_DAYS);
+		setAdding(false);
+	};
+
 	const handleAdd = async () => {
 		const title = newTitle.trim();
 		if (!title) return;
-		await addCommitment(title, newType);
-		setNewTitle("");
-		setAdding(false);
+		const dow = newType === "daily" ? daysToString(newDays) : null;
+		await addCommitment(title, newType, dow);
+		resetForm();
 		await load();
 	};
 
@@ -76,24 +86,45 @@ export default function CommitmentsScreen() {
 						returnKeyType="done"
 						onSubmitEditing={handleAdd}
 					/>
+
+					{/* Type selector */}
 					<View style={styles.typeRow}>
-						<TypeToggle
-							label="Daily"
-							subtitle="Check off each night"
-							icon="moon-outline"
+						<TypeCard
 							active={newType === "daily"}
 							color={colors.daily}
+							icon="repeat-outline"
+							label="Daily Habit"
+							desc="Shown every evening for check-in"
 							onPress={() => setNewType("daily")}
 						/>
-						<TypeToggle
-							label="Morning"
-							subtitle="Set in the morning"
-							icon="sunny-outline"
+						<TypeCard
 							active={newType === "morning"}
 							color={colors.morning}
+							icon="sunny-outline"
+							label="Morning Template"
+							desc="Available each morning to add as daily intention"
 							onPress={() => setNewType("morning")}
 						/>
 					</View>
+
+					{/* Day picker — only for daily habits */}
+					{newType === "daily" && (
+						<View style={styles.dayPickerBlock}>
+							<Text style={styles.dayPickerLabel}>Applies on</Text>
+							<DayOfWeekPicker value={newDays} onChange={setNewDays} color={colors.daily} />
+						</View>
+					)}
+
+					{newType === "morning" && (
+						<View style={styles.morningNote}>
+							<Ionicons name="information-circle-outline" size={14} color={colors.textMuted} />
+							<Text style={styles.morningNoteText}>
+								Morning templates appear as quick-add suggestions when you set your daily intentions each
+								morning.
+							</Text>
+						</View>
+					)}
+
 					<TouchableOpacity
 						style={[styles.saveBtn, !newTitle.trim() && styles.saveBtnDisabled]}
 						onPress={handleAdd}
@@ -105,23 +136,25 @@ export default function CommitmentsScreen() {
 			)}
 
 			<ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-				<SectionBlock
-					label="Daily Commitments"
-					subtitle="Ring every evening"
+				<Section
+					label="Daily Habits"
+					subtitle="Checked off every evening"
 					color={colors.daily}
 					items={daily}
+					showDays
 					onToggleActive={handleToggleActive}
 					onDelete={handleDelete}
-					emptyText="No daily commitments yet"
+					emptyText="No daily habits yet"
 				/>
-				<SectionBlock
-					label="Morning Goals"
-					subtitle="Ring every morning"
+				<Section
+					label="Morning Templates"
+					subtitle="Quick-add as daily intentions each morning"
 					color={colors.morning}
 					items={morning}
+					showDays={false}
 					onToggleActive={handleToggleActive}
 					onDelete={handleDelete}
-					emptyText="No morning goals yet"
+					emptyText="No morning templates yet"
 				/>
 			</ScrollView>
 		</KeyboardAvoidingView>
@@ -130,35 +163,36 @@ export default function CommitmentsScreen() {
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-function TypeToggle({
-	label,
-	subtitle,
-	icon,
+function TypeCard({
 	active,
 	color,
+	icon,
+	label,
+	desc,
 	onPress,
 }: {
-	label: string;
-	subtitle: string;
-	icon: any;
 	active: boolean;
 	color: string;
+	icon: any;
+	label: string;
+	desc: string;
 	onPress: () => void;
 }) {
 	return (
-		<TouchableOpacity style={[styles.typeBtn, active && { borderColor: color, backgroundColor: color + "18" }]} onPress={onPress}>
-			<Ionicons name={icon} size={18} color={active ? color : colors.textSecondary} />
-			<Text style={[styles.typeBtnLabel, active && { color }]}>{label}</Text>
-			<Text style={styles.typeBtnSub}>{subtitle}</Text>
+		<TouchableOpacity style={[styles.typeCard, active && { borderColor: color, backgroundColor: color + "15" }]} onPress={onPress}>
+			<Ionicons name={icon} size={20} color={active ? color : colors.textSecondary} />
+			<Text style={[styles.typeCardLabel, active && { color }]}>{label}</Text>
+			<Text style={styles.typeCardDesc}>{desc}</Text>
 		</TouchableOpacity>
 	);
 }
 
-function SectionBlock({
+function Section({
 	label,
 	subtitle,
 	color,
 	items,
+	showDays,
 	onToggleActive,
 	onDelete,
 	emptyText,
@@ -167,6 +201,7 @@ function SectionBlock({
 	subtitle: string;
 	color: string;
 	items: Commitment[];
+	showDays: boolean;
 	onToggleActive: (c: Commitment) => void;
 	onDelete: (c: Commitment) => void;
 	emptyText: string;
@@ -177,12 +212,19 @@ function SectionBlock({
 				<View style={[styles.sectionDot, { backgroundColor: color }]} />
 				<View>
 					<Text style={styles.sectionLabel}>{label}</Text>
-					<Text style={styles.sectionSubtitle}>{subtitle}</Text>
+					<Text style={styles.sectionSub}>{subtitle}</Text>
 				</View>
 			</View>
 			{items.length === 0 && <Text style={styles.emptyText}>{emptyText}</Text>}
 			{items.map((c) => (
-				<CommitmentItem key={c.id} commitment={c} color={color} onToggleActive={() => onToggleActive(c)} onDelete={() => onDelete(c)} />
+				<CommitmentItem
+					key={c.id}
+					commitment={c}
+					color={color}
+					showDays={showDays}
+					onToggleActive={() => onToggleActive(c)}
+					onDelete={() => onDelete(c)}
+				/>
 			))}
 		</View>
 	);
@@ -191,23 +233,30 @@ function SectionBlock({
 function CommitmentItem({
 	commitment: c,
 	color,
+	showDays,
 	onToggleActive,
 	onDelete,
 }: {
 	commitment: Commitment;
 	color: string;
+	showDays: boolean;
 	onToggleActive: () => void;
 	onDelete: () => void;
 }) {
 	const active = c.is_active === 1;
+	const dayStr = showDays ? daysLabel(c.days_of_week) : null;
+
 	return (
 		<View style={[styles.item, !active && styles.itemInactive]}>
 			<TouchableOpacity style={styles.itemToggle} onPress={onToggleActive}>
-				<View style={[styles.activeIndicator, { backgroundColor: active ? color : colors.border }]} />
+				<View style={[styles.activeDot, { backgroundColor: active ? color : colors.border }]} />
 			</TouchableOpacity>
-			<Text style={[styles.itemTitle, !active && styles.itemTitleInactive]}>{c.title}</Text>
+			<View style={styles.itemBody}>
+				<Text style={[styles.itemTitle, !active && styles.itemTitleInactive]}>{c.title}</Text>
+				{dayStr && <Text style={styles.itemDays}>{dayStr}</Text>}
+			</View>
 			<TouchableOpacity style={styles.deleteBtn} onPress={onDelete}>
-				<Ionicons name="trash-outline" size={16} color={colors.textMuted} />
+				<Ionicons name="trash-outline" size={15} color={colors.textMuted} />
 			</TouchableOpacity>
 		</View>
 	);
@@ -215,10 +264,7 @@ function CommitmentItem({
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-	container: {
-		flex: 1,
-		backgroundColor: colors.bg,
-	},
+	container: { flex: 1, backgroundColor: colors.bg },
 	header: {
 		flexDirection: "row",
 		alignItems: "center",
@@ -229,11 +275,7 @@ const styles = StyleSheet.create({
 		borderBottomWidth: 1,
 		borderBottomColor: colors.border,
 	},
-	title: {
-		fontSize: 36,
-		fontWeight: "700",
-		color: colors.textPrimary,
-	},
+	title: { fontSize: 36, fontWeight: "700", color: colors.textPrimary },
 	addBtn: {
 		width: 40,
 		height: 40,
@@ -255,114 +297,72 @@ const styles = StyleSheet.create({
 		borderColor: colors.border,
 		borderRadius: radius.md,
 		paddingHorizontal: spacing.md,
-		paddingVertical: spacing.md,
+		paddingVertical: 12,
 		fontSize: 16,
 		color: colors.textPrimary,
 	},
-	typeRow: {
-		flexDirection: "row",
-		gap: spacing.sm,
-	},
-	typeBtn: {
+	typeRow: { flexDirection: "row", gap: spacing.sm },
+	typeCard: {
 		flex: 1,
 		padding: spacing.md,
 		borderRadius: radius.md,
 		borderWidth: 1,
 		borderColor: colors.border,
-		alignItems: "flex-start",
 		gap: 4,
 	},
-	typeBtnLabel: {
-		fontSize: 14,
-		fontWeight: "600",
-		color: colors.textSecondary,
+	typeCardLabel: { fontSize: 13, fontWeight: "700", color: colors.textSecondary, marginTop: 4 },
+	typeCardDesc: { fontSize: 11, color: colors.textMuted, lineHeight: 15 },
+	dayPickerBlock: {
+		backgroundColor: colors.surface,
+		borderRadius: radius.md,
+		borderWidth: 1,
+		borderColor: colors.border,
+		padding: spacing.md,
+		gap: spacing.sm,
 	},
-	typeBtnSub: {
-		fontSize: 11,
-		color: colors.textMuted,
+	dayPickerLabel: { fontSize: 12, fontWeight: "600", color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 1 },
+	morningNote: {
+		flexDirection: "row",
+		gap: spacing.sm,
+		backgroundColor: colors.surface,
+		borderRadius: radius.sm,
+		padding: spacing.md,
+		borderWidth: 1,
+		borderColor: colors.border,
 	},
+	morningNoteText: { flex: 1, fontSize: 12, color: colors.textMuted, lineHeight: 18 },
 	saveBtn: {
 		backgroundColor: colors.accent,
 		borderRadius: radius.md,
 		padding: spacing.md,
 		alignItems: "center",
 	},
-	saveBtnDisabled: {
-		opacity: 0.4,
-	},
-	saveBtnText: {
-		color: "#000",
-		fontWeight: "700",
-		fontSize: 15,
-	},
+	saveBtnDisabled: { opacity: 0.35 },
+	saveBtnText: { color: "#000", fontWeight: "700", fontSize: 15 },
 	scroll: { flex: 1 },
-	scrollContent: {
-		padding: spacing.lg,
-		paddingBottom: 100,
-		gap: spacing.xl,
-	},
-	section: {
-		gap: spacing.sm,
-	},
-	sectionHeader: {
-		flexDirection: "row",
-		alignItems: "center",
-		gap: spacing.sm,
-		marginBottom: spacing.xs,
-	},
-	sectionDot: {
-		width: 8,
-		height: 8,
-		borderRadius: 99,
-	},
-	sectionLabel: {
-		fontSize: 13,
-		fontWeight: "600",
-		color: colors.textPrimary,
-		textTransform: "uppercase",
-		letterSpacing: 1,
-	},
-	sectionSubtitle: {
-		fontSize: 11,
-		color: colors.textMuted,
-	},
-	emptyText: {
-		color: colors.textMuted,
-		fontSize: 13,
-		paddingVertical: spacing.sm,
-	},
+	scrollContent: { padding: spacing.lg, paddingBottom: 100, gap: spacing.xl },
+	section: { gap: spacing.sm },
+	sectionHeader: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginBottom: spacing.xs },
+	sectionDot: { width: 8, height: 8, borderRadius: 99 },
+	sectionLabel: { fontSize: 13, fontWeight: "600", color: colors.textPrimary, textTransform: "uppercase", letterSpacing: 1 },
+	sectionSub: { fontSize: 11, color: colors.textMuted },
+	emptyText: { color: colors.textMuted, fontSize: 13, paddingVertical: spacing.sm },
 	item: {
 		flexDirection: "row",
 		alignItems: "center",
 		gap: spacing.md,
-		paddingVertical: spacing.md,
-		paddingHorizontal: spacing.md,
+		padding: spacing.md,
 		backgroundColor: colors.surface,
 		borderRadius: radius.md,
 		borderWidth: 1,
 		borderColor: colors.border,
 	},
-	itemInactive: {
-		opacity: 0.45,
-	},
-	itemToggle: {
-		padding: 4,
-	},
-	activeIndicator: {
-		width: 10,
-		height: 10,
-		borderRadius: 99,
-	},
-	itemTitle: {
-		flex: 1,
-		fontSize: 15,
-		color: colors.textPrimary,
-	},
-	itemTitleInactive: {
-		textDecorationLine: "line-through",
-		color: colors.textSecondary,
-	},
-	deleteBtn: {
-		padding: 4,
-	},
+	itemInactive: { opacity: 0.4 },
+	itemToggle: { padding: 4 },
+	activeDot: { width: 10, height: 10, borderRadius: 99 },
+	itemBody: { flex: 1, gap: 2 },
+	itemTitle: { fontSize: 15, color: colors.textPrimary },
+	itemTitleInactive: { textDecorationLine: "line-through", color: colors.textSecondary },
+	itemDays: { fontSize: 11, color: colors.textMuted },
+	deleteBtn: { padding: 4 },
 });
